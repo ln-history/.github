@@ -3,6 +3,7 @@
 See [ln-history.info](https://ln-history.info) for a complete documentation of the project. 
 
 ## Architecture 
-![](./ln-history-architecture.drawio.svg?sanitized=true)
+![](https://ln-history.info/architecture.svg)
 
-See [this file](./ln-history-architecture.svg) for the architecture.
+
+
