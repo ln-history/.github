@@ -1,0 +1,204 @@
+// --- MASTER REGISTRY ---
+Table gossip_inventory {
+  gossip_id varchar(64) [pk]
+  type int [not null, note: '256=channel_announcement, 257=node_announcement, 258=channel_update']
+  first_seen_at timestamptz [default: `now()`]
+}
+
+// --- INFRASTRUCTURE ---
+// Collector nodes
+Table collectors {
+  node_id varchar(66) [pk]
+  alias varchar(100)
+  first_collection_at timestamptz [default: `now()`]
+  last_collection_at timestamptz
+  total_messages_collected bigint [default: 0]
+  notes text
+}
+
+// --- OBSERVATIONS ---
+// "Who saw what and when."
+Table gossip_observations {
+  gossip_id varchar(64)
+  collector_node_id varchar(66)
+  seen_at timestamptz [not null]
+  
+  indexes {
+    (gossip_id, collector_node_id) [pk]
+    (seen_at) 
+  }
+}
+
+// --- PUBLIC NODES ---
+// General existence record
+Table nodes {
+  node_id varchar(66) [pk]
+  first_seen timestamptz
+  last_seen timestamptz
+}
+
+// --- ADDRESS NORMALIZATION ---
+Table address_types {
+  id int [pk, note: '1=IPv4, 2=IPv6, 3=TorV2, 4=TorV3, 5=DNS']
+  name varchar(20)
+}
+
+Table node_addresses {
+  id bigserial [pk]
+  gossip_id varchar(64) [note: 'Links to the specific announcement version']
+  type_id int
+  address varchar(255)
+  port int
+}
+
+// --- CONTENT TABLES ---
+
+Table node_announcements {
+  gossip_id varchar(64) [pk]
+  node_id varchar(66)
+  
+  // Validity Range
+  valid_from timestamptz [note: 'The timestamp inside the gossip message']
+  valid_to timestamptz [note: 'When the NEXT announcement replaced this one (NULL = Current)']
+  
+  signature varchar(144)
+  features bytea
+  rgb_color varchar(6)
+  alias varchar(32)
+  raw_gossip bytea [note: 'Stored here for fast snapshot queries']
+
+  indexes {
+    (node_id)
+    (valid_from, valid_to) // Time-Travel Index
+  }
+}
+
+Table channels {
+  gossip_id varchar(64) [pk]
+  scid bigint [unique, note: 'Stored as Integer for performance']
+  
+  // Chain Data (Enriched by external service)
+  funding_timestamp timestamptz 
+  closing_timestamp timestamptz 
+  capacity_sat bigint
+
+  source_node_id varchar(66)
+  target_node_id varchar(66)
+  
+  // Static Gossip Data
+  node_signature_1 varchar(144)
+  node_signature_2 varchar(144)
+  bitcoin_signature_1 varchar(144)
+  bitcoin_signature_2 varchar(144)
+  features bytea
+  chain_hash varchar(64)
+  bitcoin_key_1 varchar(66)
+  bitcoin_key_2 varchar(66)
+  raw_gossip bytea [note: 'Stored here for fast snapshot queries']
+
+  indexes {
+    (closing_timestamp) 
+  }
+}
+
+// --- CLOSURE ANALYSIS ---
+// Stores the final state of a channel after it has been spent on-chain.
+Table channel_closures {
+  gossip_id varchar(64) [pk, note: 'Foreign Key to channels.gossip_id']
+  
+  // Chain Meta
+  closing_txid varchar(64)
+  closing_height int
+  closing_timestamp timestamptz
+  
+  // Classification
+  type varchar(20) [note: "Enum: 'mutual', 'force', 'breach', 'unknown'"]
+  
+  // Economic Analysis
+  settled_balance_sat bigint [note: 'Total value output to participants']
+  mining_fee_sat bigint [note: 'Cost of closure (Capacity - Settled)']
+  
+  // Distribution (Heuristic)
+  output_0_sat bigint [note: 'First significant output']
+  output_1_sat bigint [note: 'Second significant output']
+  
+  // Attributed Balances
+  balance_node_1_sat bigint [note: 'Mapped to channels.source_node_id']
+  balance_node_2_sat bigint [note: 'Mapped to channels.target_node_id']
+}
+
+// --- RELATIONSHIPS ---
+// A channel has 0 or 1 closure record.
+Ref: channel_closures.gossip_id - channels.gossip_id
+
+Table channel_updates {
+  gossip_id varchar(64) [pk]
+  scid bigint [note: 'Matches channels.scid']
+  direction bit [note: '0 or 1']
+  
+  // Validity Range
+  valid_from timestamptz [note: 'The timestamp inside the gossip message']
+  valid_to timestamptz [note: 'When the NEXT update replaced this one (NULL = Current)']
+  
+  signature varchar(144)
+  chain_hash varchar(64)
+  message_flags int
+  channel_flags int
+  cltv_expiry_delta int
+  htlc_minimum_msat bigint
+  fee_base_msat bigint
+  fee_proportional_millionths bigint
+  htlc_maximum_msat bigint
+  raw_gossip bytea [note: 'Stored here for fast snapshot queries']
+
+  indexes {
+    (scid, direction)
+    (valid_from, valid_to) // Time-Travel Index
+  }
+}
+
+// --- PEER OPERATIONS ---
+Table observed_peers {
+  node_id varchar(66) [pk]
+  first_connected_at timestamptz
+  last_connected_at timestamptz
+  notes text
+}
+
+Table peer_sessions {
+  id bigserial [pk]
+  collector_node_id varchar(66)
+  peer_node_id varchar(66)
+  features text
+  connected_at timestamptz
+  disconnected_at timestamptz
+}
+
+Table peer_addresses {
+  id bigserial [pk]
+  session_id bigint
+  type_id int
+  address varchar(255)
+  port int
+}
+
+// --- RELATIONS ---
+Ref: gossip_observations.gossip_id > gossip_inventory.gossip_id
+Ref: gossip_observations.collector_node_id > collectors.node_id
+
+Ref: node_announcements.gossip_id - gossip_inventory.gossip_id
+Ref: channels.gossip_id - gossip_inventory.gossip_id
+Ref: channel_updates.gossip_id - gossip_inventory.gossip_id
+
+Ref: node_announcements.node_id > nodes.node_id
+Ref: channels.source_node_id > nodes.node_id
+Ref: channels.target_node_id > nodes.node_id
+
+Ref: node_addresses.gossip_id > node_announcements.gossip_id
+Ref: node_addresses.type_id > address_types.id
+
+Ref: peer_sessions.collector_node_id > collectors.node_id
+Ref: peer_sessions.peer_node_id > observed_peers.node_id
+
+Ref: peer_addresses.session_id > peer_sessions.id
+Ref: peer_addresses.type_id > address_types.id
